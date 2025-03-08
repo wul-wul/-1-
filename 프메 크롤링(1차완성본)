@@ -140,8 +140,8 @@ class FredmeyerCrawlerUI:
             self.status_var.set("준비")
             self.progress_var.set(100)
             
-            # 크롤링이 완료되면 UI 창 종료
-            self.window.quit()
+            # 크롤링이 완료되면 UI 창 종료 (임시로 주석 처리)
+            # self.window.quit()
 
     def stop_crawling(self):
         """크롤링 중지"""
@@ -162,7 +162,7 @@ class FredmeyerCrawlerUI:
         options.add_experimental_option('useAutomationExtension', False)
         
         # Service 객체 생성
-        service = Service(ChromeDriverManager().install())
+        service = Service(executable_path=r"C:\chromedriver\chromedriver.exe")
         driver = webdriver.Chrome(service=service, options=options)
         driver.set_window_position(0, 0)
         
