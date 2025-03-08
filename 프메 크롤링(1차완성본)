@@ -1,0 +1,991 @@
+import tkinter as tk
+from tkinter import ttk, messagebox
+from selenium import webdriver
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from webdriver_manager.chrome import ChromeDriverManager
+import pandas as pd
+import time
+from datetime import datetime
+import requests
+import os
+import re
+from PIL import Image, ImageOps
+
+class FredmeyerCrawlerUI:
+    def __init__(self):
+        self.window = tk.Tk()
+        self.window.title("프레드메이어 크롤러")
+        self.window.geometry("800x600")
+        
+        # 메인 프레임
+        main_frame = ttk.Frame(self.window, padding="10")
+        main_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # URL 입력 프레임
+        url_frame = ttk.LabelFrame(main_frame, text="URL 입력", padding="5")
+        url_frame.pack(fill=tk.X, pady=5)
+        
+        # URL 입력 필드
+        self.url_var = tk.StringVar()
+        self.url_entry = ttk.Entry(url_frame, textvariable=self.url_var, width=70)
+        self.url_entry.pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
+        
+        # 버튼 프레임
+        button_frame = ttk.Frame(url_frame)
+        button_frame.pack(side=tk.LEFT, padx=5)
+        
+        # 크롤링 시작 버튼
+        self.start_button = ttk.Button(button_frame, text="크롤링 시작", command=self.start_crawling)
+        self.start_button.pack(side=tk.LEFT, padx=2)
+        
+        # 크롤링 중지 버튼
+        self.stop_button = ttk.Button(button_frame, text="크롤링 중지", command=self.stop_crawling, state="disabled")
+        self.stop_button.pack(side=tk.LEFT, padx=2)
+        
+        # 크롤링 중지 플래그 추가
+        self.stop_flag = False
+        
+        # 옵션 프레임
+        options_frame = ttk.LabelFrame(main_frame, text="크롤링 옵션", padding="5")
+        options_frame.pack(fill=tk.X, pady=5)
+        
+        # 크롤링 개수 옵션
+        ttk.Label(options_frame, text="최대 크롤링 개수:").pack(side=tk.LEFT, padx=5)
+        self.max_items_var = tk.IntVar(value=200)
+        max_items_spin = ttk.Spinbox(options_frame, from_=1, to=200, width=5, textvariable=self.max_items_var)
+        max_items_spin.pack(side=tk.LEFT)
+        
+        # 이미지 다운로드 옵션
+        self.download_images_var = tk.BooleanVar(value=True)
+        download_check = ttk.Checkbutton(options_frame, text="이미지 자동 다운로드", variable=self.download_images_var)
+        download_check.pack(side=tk.LEFT, padx=(20, 5))
+        
+        # 판매자 상품코드 입력 프레임
+        code_frame = ttk.LabelFrame(main_frame, text="판매자 상품코드 설정", padding="5")
+        code_frame.pack(fill=tk.X, pady=5)
+        
+        # 판매자 상품코드 입력 필드
+        ttk.Label(code_frame, text="시작 상품코드:").pack(side=tk.LEFT, padx=5)
+        self.product_code_var = tk.StringVar(value="20250305-W001")
+        product_code_entry = ttk.Entry(code_frame, width=20, textvariable=self.product_code_var)
+        product_code_entry.pack(side=tk.LEFT, padx=5)
+        ttk.Label(code_frame, text="(예: 20250305-W001)").pack(side=tk.LEFT, padx=5)
+        
+        # 진행 상황 표시
+        self.progress_var = tk.DoubleVar()
+        self.progress = ttk.Progressbar(main_frame, orient="horizontal", length=100, mode="determinate", variable=self.progress_var)
+        self.progress.pack(fill=tk.X, pady=5)
+        
+        # 로그 출력 영역
+        log_frame = ttk.LabelFrame(main_frame, text="크롤링 로그", padding="5")
+        log_frame.pack(fill=tk.BOTH, expand=True, pady=5)
+        
+        # 로그 텍스트 위젯과 스크롤바
+        self.log_text = tk.Text(log_frame, height=20, wrap=tk.WORD)
+        scrollbar = ttk.Scrollbar(log_frame, orient=tk.VERTICAL, command=self.log_text.yview)
+        self.log_text.configure(yscrollcommand=scrollbar.set)
+        
+        self.log_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        # 상태 표시줄
+        self.status_var = tk.StringVar()
+        self.status_var.set("준비")
+        status_label = ttk.Label(main_frame, textvariable=self.status_var)
+        status_label.pack(fill=tk.X, pady=5)
+
+    def log(self, message):
+        """로그 메시지를 로그 창에 추가"""
+        self.log_text.insert(tk.END, message + "\n")
+        self.log_text.see(tk.END)
+        self.window.update()
+
+    def start_crawling(self):
+        """크롤링 시작"""
+        url = self.url_var.get().strip()
+        if not url:
+            messagebox.showerror("오류", "URL을 입력해주세요.")
+            return
+        
+        # 버튼 상태 변경
+        self.start_button.configure(state='disabled')
+        self.stop_button.configure(state='normal')
+        self.stop_flag = False
+        
+        self.log_text.delete(1.0, tk.END)
+        self.status_var.set("크롤링 중...")
+        self.progress_var.set(0)
+        
+        try:
+            self.crawl_products(url)
+        except Exception as e:
+            self.log(f"오류 발생: {str(e)}")
+            import traceback
+            self.log(traceback.format_exc())
+        finally:
+            # 크롬 브라우저 종료 시도
+            try:
+                if os.name == 'nt':  # Windows
+                    os.system("taskkill /f /im chromedriver.exe >nul 2>&1")
+                else:  # Linux/Mac
+                    os.system("pkill -f chromedriver >/dev/null 2>&1")
+            except:
+                pass
+            
+            self.start_button.configure(state='normal')
+            self.stop_button.configure(state='disabled')
+            self.status_var.set("준비")
+            self.progress_var.set(100)
+            
+            # 크롤링이 완료되면 UI 창 종료
+            self.window.quit()
+
+    def stop_crawling(self):
+        """크롤링 중지"""
+        self.stop_flag = True
+        self.log("\n크롤링을 중지합니다...")
+        self.status_var.set("중지 중...")
+
+    def setup_driver(self):
+        """Selenium 웹드라이버 설정"""
+        options = webdriver.ChromeOptions()
+        options.add_argument('--window-size=1024,768')
+        options.add_argument('--disable-blink-features=AutomationControlled')
+        options.add_argument('--disable-gpu')
+        options.add_argument('--disable-extensions')
+        options.add_argument('--disable-infobars')
+        
+        options.add_experimental_option('excludeSwitches', ['enable-automation'])
+        options.add_experimental_option('useAutomationExtension', False)
+        
+        # Service 객체 생성
+        service = Service(ChromeDriverManager().install())
+        driver = webdriver.Chrome(service=service, options=options)
+        driver.set_window_position(0, 0)
+        
+        # 자동화 감지 회피
+        driver.execute_cdp_cmd('Page.addScriptToEvaluateOnNewDocument', {
+            'source': '''
+                Object.defineProperty(navigator, 'webdriver', {
+                    get: () => undefined
+                })
+            '''
+        })
+        return driver
+
+    def crawl_product_details(self, url, index=None, total=None):
+        """상품 상세 페이지 크롤링"""
+        driver = None
+        try:
+            if index is not None and total is not None:
+                self.log(f"\n상품 {index}/{total} 상세 정보 크롤링 중...")
+            
+            driver = self.setup_driver()
+            driver.get(url)
+            time.sleep(3)
+            
+            # 상품명 추출
+            name = "상품명 없음"
+            try:
+                name = driver.find_element(By.CSS_SELECTOR, "h1.ProductDetails-header").text.strip()
+            except:
+                try:
+                    name = driver.find_element(By.CSS_SELECTOR, ".kds-Text--l.kds-Text--bold").text.strip()
+                except:
+                    pass
+            
+            self.log(f"상품명: {name}")
+            
+            # 가격 추출
+            price_numeric = ""  # 숫자만 저장할 변수
+            try:
+                price_elem = driver.find_element(By.CSS_SELECTOR, "mark.kds-Price-promotional")
+                price_text = price_elem.text.strip()
+                
+                # 숫자만 추출 (소수점 포함)
+                price_numeric = re.sub(r'[^\d.]', '', price_text)
+            except:
+                pass
+            
+            self.log(f"숫자 가격: {price_numeric}")
+            
+            # 이미지 URL 추출 (최대 3개)
+            images = []
+            
+            # 방법 1: 직접 이미지 URL 추출 (xlarge 크기로 변경)
+            try:
+                product_id = url.split('/')[-1].split('?')[0]
+                if product_id:
+                    base_url = "https://www.kroger.com/product/images/xlarge"  # large에서 xlarge로 변경
+                    img_urls = [
+                        f"{base_url}/front/{product_id}",
+                        f"{base_url}/back/{product_id}",
+                        f"{base_url}/right/{product_id}"
+                    ]
+                    for img_url in img_urls:
+                        images.append(img_url)
+            except:
+                pass
+            
+            # 방법 2: 고해상도 이미지 요소 찾기
+            if not images:
+                try:
+                    # 확대 이미지 찾기
+                    zoom_imgs = driver.find_elements(By.CSS_SELECTOR, ".iiz__zoom-img")
+                    if zoom_imgs:
+                        for img in zoom_imgs[:3]:
+                            src = img.get_attribute("src")
+                            if src:
+                                images.append(src)
+                                self.log(f"확대 이미지 찾음: {src}")
+                except:
+                    pass
+            
+            # 방법 3: 일반 이미지 중 xlarge 찾기
+            if not images:
+                try:
+                    all_images = driver.find_elements(By.TAG_NAME, "img")
+                    for img in all_images:
+                        src = img.get_attribute("src")
+                        if src and "xlarge" in src and ("kroger.com/product/images" in src or "fredmeyer.com/product/images" in src):
+                            images.append(src)
+                            if len(images) >= 3:
+                                break
+                except:
+                    pass
+            
+            # 방법 4: 일반 이미지 찾기 (xlarge가 없는 경우)
+            if not images:
+                try:
+                    all_images = driver.find_elements(By.TAG_NAME, "img")
+                    for img in all_images:
+                        src = img.get_attribute("src")
+                        if src and ("kroger.com/product/images" in src or "fredmeyer.com/product/images" in src):
+                            # large 이미지를 xlarge로 변환 시도
+                            if "large" in src:
+                                src = src.replace("large", "xlarge")
+                            images.append(src)
+                            if len(images) >= 3:
+                                break
+                except:
+                    pass
+            
+            # 이미지가 부족한 경우 처리
+            if len(images) == 0:
+                self.log("이미지를 찾을 수 없습니다. 더미 이미지를 사용합니다.")
+                # 더미 이미지 URL 생성 (실제로는 존재하지 않는 URL)
+                dummy_image = "https://www.fredmeyer.com/product/images/xlarge/dummy"
+                images = [dummy_image, dummy_image, dummy_image]
+            elif len(images) > 0:
+                first_image = images[0]
+                # 2번 이미지가 없으면 1번 이미지 사용
+                if len(images) < 2:
+                    images.append(first_image)
+                    self.log("2번 이미지 없음: 1번 이미지로 대체합니다.")
+                # 3번 이미지가 없으면 1번 이미지 사용
+                if len(images) < 3:
+                    images.append(first_image)
+                    self.log("3번 이미지 없음: 1번 이미지로 대체합니다.")
+            
+            # 결과 반환
+            return {
+                "상품명": name,
+                "숫자 가격": price_numeric,
+                "상품 링크": url,
+                "이미지1": images[0] if len(images) > 0 else "이미지 없음",
+                "이미지2": images[1] if len(images) > 1 else "이미지 없음",
+                "이미지3": images[2] if len(images) > 2 else "이미지 없음"
+            }
+            
+        except Exception as e:
+            self.log(f"상세 페이지 크롤링 중 오류 발생: {str(e)}")
+            return None
+        finally:
+            try:
+                if driver:
+                    driver.quit()
+            except:
+                pass
+
+    def process_image(self, img_path):
+        """이미지 처리 - 중앙 배치 및 최적화"""
+        try:
+            # 이미지 열기
+            img = Image.open(img_path)
+            
+            # RGBA 이미지를 RGB로 변환 (필요한 경우)
+            if img.mode == 'RGBA':
+                img = img.convert('RGB')
+            
+            # 이미지 크기 확인
+            img_w, img_h = img.size
+            
+            # 새 캔버스 생성 (1000x1000, 흰색 배경)
+            canvas = Image.new('RGB', (1000, 1000), (255, 255, 255))
+            
+            # 이미지 크기 유지하면서 중앙에 배치
+            left = (1000 - img_w) // 2
+            top = (1000 - img_h) // 2
+            
+            # 이미지 붙여넣기
+            canvas.paste(img, (left, top))
+            
+            # 이미지 최적화 및 저장
+            canvas.save(
+                img_path,
+                'JPEG',
+                quality=90,  # 90% 품질로 저장
+                optimize=True,  # 파일 크기 최적화
+                progressive=True  # 프로그레시브 JPEG 형식 사용
+            )
+            
+            # 파일 크기 확인 및 반환
+            file_size = os.path.getsize(img_path) / 1024  # KB로 변환
+            return file_size
+        except Exception as e:
+            self.log(f"  이미지 처리 중 오류: {str(e)}")
+            return 0
+
+    def crawl_products(self, url):
+        """상품 페이지 크롤링 메인 함수"""
+        self.log("=== 프레드메이어 상품 크롤링 시작 ===")
+        self.log(f"대상 URL: {url}")
+        
+        if not url.startswith('http'):
+            url = 'https://' + url.lstrip('/')
+        
+        # 단일 상품 상세 페이지인 경우
+        if '/p/' in url:
+            if not self.stop_flag:
+                product = self.crawl_product_details(url)
+                if product:
+                    # 판매자 상품코드 기본값 가져오기
+                    base_product_code = self.product_code_var.get()
+                    
+                    # 날짜와 코드 접두사 분리 (예: "20250305-W001" -> "20250305", "W001")
+                    code_parts = base_product_code.split('-')
+                    date_part = code_parts[0] if len(code_parts) > 0 else datetime.now().strftime("%Y%m%d")
+                    code_prefix = code_parts[1] if len(code_parts) > 1 else "W001"
+                    
+                    # 판매자 상품코드 추가
+                    product["판매자 상품코드"] = base_product_code
+                    
+                    # 이미지 파일명 설정 (예: "W001-1.jpg", "W001-2.jpg", "W001-3.jpg")
+                    code_suffix = code_prefix
+                    product["이미지파일1"] = f"{code_suffix}-1.jpg" if product["이미지1"] != "이미지 없음" else ""
+                    product["이미지파일2"] = f"{code_suffix}-2.jpg" if product["이미지2"] != "이미지 없음" else ""
+                    product["이미지파일3"] = f"{code_suffix}-3.jpg" if product["이미지3"] != "이미지 없음" else ""
+                    
+                    self.save_to_excel([product])
+                    self.log("\n크롤링이 완료되었습니다.")
+            return
+        
+        # 상품 목록 페이지인 경우 크롤링
+        driver = None
+        products = []
+        product_links = []
+        current_page = 1
+        
+        try:
+            driver = self.setup_driver()
+            
+            # 최대 3페이지까지 크롤링 (또는 최대 상품 수에 도달할 때까지)
+            while current_page <= 3 and len(product_links) < self.max_items_var.get() and not self.stop_flag:
+                current_url = url
+                
+                # 페이지 파라미터 추가 (2페이지부터)
+                if current_page > 1:
+                    self.log(f"\n{current_page}페이지로 이동합니다...")
+                    # URL에 페이지 번호 추가
+                    page_match = re.search(r'page=(\d+)', current_url)
+                    if page_match:
+                        current_url = re.sub(r'page=\d+', f'page={current_page}', current_url)
+                    else:
+                        # 페이지 파라미터가 없는 경우 추가
+                        if '?' in current_url:
+                            current_url = current_url + f'&page={current_page}'
+                        else:
+                            current_url = current_url + f'?page={current_page}'
+                    
+                    driver.get(current_url)
+                    time.sleep(5)  # 페이지 로딩 대기
+                
+                self.log(f"\n{current_page}페이지 크롤링 중...")
+                if current_page == 1:
+                    self.log("\n1. 페이지 로딩 중...")
+                    driver.get(current_url)
+                    time.sleep(5)
+                
+                self.log("2. 페이지 스크롤 중...")
+                
+                # 여러 번 스크롤하여 더 많은 상품 로드
+                prev_height = 0
+                max_scroll_attempts = 15  # 최대 스크롤 시도 횟수 증가
+                
+                for scroll_attempt in range(max_scroll_attempts):
+                    if self.stop_flag:
+                        break
+                        
+                    # 페이지 끝까지 스크롤
+                    driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+                    time.sleep(3)  # 로딩 대기 시간 증가
+                    
+                    # 현재 스크롤 높이 확인
+                    current_height = driver.execute_script("return document.body.scrollHeight")
+                    
+                    # 현재 상품 카드 수 확인
+                    current_cards = len(driver.find_elements(By.CSS_SELECTOR, ".ProductCard"))
+                    
+                    # 스크롤 진행 상황 로깅
+                    self.log(f"  스크롤 {scroll_attempt+1}/{max_scroll_attempts} 완료 (높이: {current_height}, 상품 수: {current_cards})")
+                    
+                    # 더 이상 새로운 컨텐츠가 로드되지 않으면 스크롤 중단
+                    if current_height == prev_height and scroll_attempt > 0:
+                        self.log("  더 이상 새로운 컨텐츠가 로드되지 않습니다. 스크롤 중단")
+                        break
+                        
+                    # 중간에 한번 더 스크롤 (긴 페이지에서 더 많은 상품 로드)
+                    if scroll_attempt % 3 == 2:  # 3번째, 6번째, 9번째 등의 스크롤에서
+                        driver.execute_script("window.scrollBy(0, -500);")  # 약간 위로 스크롤
+                        time.sleep(1)
+                        driver.execute_script("window.scrollBy(0, 500);")  # 다시 아래로 스크롤
+                        time.sleep(1)
+                    
+                    prev_height = current_height
+                
+                self.log("3. 상품 목록 찾는 중...")
+                
+                # 상품 카드 찾기 (여러 선택자 시도)
+                self.log("\n3. 상품 카드 찾는 중...")
+                product_cards = []
+                
+                # 방법 1: ProductCard 클래스로 찾기
+                product_cards = driver.find_elements(By.CSS_SELECTOR, ".ProductCard")
+                self.log(f"방법 1: {len(product_cards)}개의 상품 카드 발견 (ProductCard 클래스)")
+                
+                # 방법 2: 상품 링크로 직접 찾기
+                if len(product_cards) < 5:
+                    product_cards = driver.find_elements(By.CSS_SELECTOR, "a[href*='/p/']")
+                    self.log(f"방법 2: {len(product_cards)}개의 상품 카드 발견 (상품 링크)")
+                
+                # 방법 3: 일반 상품 컨테이너 찾기
+                if len(product_cards) < 5:
+                    product_cards = driver.find_elements(By.CSS_SELECTOR, ".kds-Card")
+                    self.log(f"방법 3: {len(product_cards)}개의 상품 카드 발견 (kds-Card)")
+                
+                self.log(f"\n총 {len(product_cards)}개의 상품 카드 발견")
+                
+                # 상품 링크 목록 수집
+                page_links = []
+                
+                # 방법 1: 카드에서 링크 추출
+                for card in product_cards:
+                    try:
+                        # 카드 자체가 링크인 경우
+                        if card.tag_name == 'a' and '/p/' in card.get_attribute("href"):
+                            link = card.get_attribute("href")
+                            if link and link not in page_links:
+                                if not link.startswith('http'):
+                                    link = 'https://www.fredmeyer.com' + link
+                                page_links.append(link)
+                        else:
+                            # 카드 내부에서 링크 찾기
+                            link_elems = card.find_elements(By.CSS_SELECTOR, "a[href*='/p/']")
+                            for link_elem in link_elems:
+                                link = link_elem.get_attribute("href")
+                                if link and link not in page_links:
+                                    if not link.startswith('http'):
+                                        link = 'https://www.fredmeyer.com' + link
+                                    page_links.append(link)
+                    except:
+                        continue
+                
+                # 방법 2: 페이지 전체에서 상품 링크 찾기 (백업 방법)
+                if len(page_links) < 10:
+                    self.log("  카드에서 충분한 링크를 찾지 못했습니다. 페이지 전체에서 링크를 찾습니다.")
+                    try:
+                        all_links = driver.find_elements(By.CSS_SELECTOR, "a[href*='/p/']")
+                        for link_elem in all_links:
+                            link = link_elem.get_attribute("href")
+                            if link and link not in page_links:
+                                if not link.startswith('http'):
+                                    link = 'https://www.fredmeyer.com' + link
+                                page_links.append(link)
+                    except:
+                        pass
+                
+                self.log(f"\n{current_page}페이지에서 {len(page_links)}개의 상품 링크 추출 성공")
+                
+                # 전체 링크 목록에 추가
+                product_links.extend(page_links)
+                
+                # 다음 페이지로 이동
+                if len(page_links) == 0:
+                    self.log(f"더 이상 상품이 없습니다. 페이지 크롤링을 중단합니다.")
+                    break
+                
+                current_page += 1
+            
+            # 메인 브라우저 종료
+            if driver:
+                driver.quit()
+                driver = None
+                
+            # 상세 페이지 크롤링
+            self.log("\n상세 페이지 크롤링 시작...")
+            total_links = len(product_links)
+            
+            # 사용자가 지정한 최대 크롤링 개수
+            max_products = min(self.max_items_var.get(), total_links)
+            self.log(f"총 {total_links}개 중 {max_products}개 상품 크롤링 예정")
+            
+            # 판매자 상품코드 기본값 가져오기
+            base_product_code = self.product_code_var.get()
+            
+            # 날짜와 코드 접두사 분리 (예: "20250305-W001" -> "20250305", "W001")
+            code_parts = base_product_code.split('-')
+            date_part = code_parts[0] if len(code_parts) > 0 else datetime.now().strftime("%Y%m%d")
+            code_prefix = code_parts[1] if len(code_parts) > 1 else "W001"
+            
+            # 코드 접두사에서 문자 부분과 숫자 부분 분리 (예: "W001" -> "W", "001")
+            match = re.match(r'([A-Za-z]+)(\d+)', code_prefix)
+            if match:
+                letter_part = match.group(1)  # 예: "W"
+                number_part = match.group(2)  # 예: "001"
+                start_number = int(number_part)
+            else:
+                letter_part = "W"
+                start_number = 1
+            
+            for i, link in enumerate(product_links[:max_products]):
+                if self.stop_flag:
+                    self.log("\n사용자가 크롤링을 중지했습니다.")
+                    break
+                    
+                try:
+                    product = self.crawl_product_details(link, i+1, max_products)
+                    if product:
+                        # 판매자 상품코드 생성 (예: "20250305-W001", "20250305-W002", ...)
+                        current_number = start_number + i
+                        formatted_number = f"{current_number:03d}"  # 숫자를 3자리로 포맷팅 (예: 1 -> "001")
+                        product_code = f"{date_part}-{letter_part}{formatted_number}"
+                        
+                        # 판매자 상품코드 추가
+                        product["판매자 상품코드"] = product_code
+                        
+                        # 이미지 파일명 설정 (예: "W001-1.jpg", "W001-2.jpg", "W001-3.jpg")
+                        code_suffix = f"{letter_part}{formatted_number}"
+                        product["이미지파일1"] = f"{code_suffix}-1.jpg" if product["이미지1"] != "이미지 없음" else ""
+                        product["이미지파일2"] = f"{code_suffix}-2.jpg" if product["이미지2"] != "이미지 없음" else ""
+                        product["이미지파일3"] = f"{code_suffix}-3.jpg" if product["이미지3"] != "이미지 없음" else ""
+                        
+                        products.append(product)
+                    # 진행률 업데이트
+                    progress = (i + 1) / max_products * 100
+                    self.progress_var.set(progress)
+                    self.window.update_idletasks()
+                except Exception as e:
+                    self.log(f"상품 {i+1} 상세 정보 크롤링 실패: {str(e)}")
+            
+            if products:
+                self.save_to_excel(products)
+                self.log(f"\n총 {len(products)}개의 상품 정보를 찾았습니다.")
+            else:
+                self.log("\n저장할 상품 정보가 없습니다.")
+        
+        except Exception as e:
+            self.log(f"\n크롤링 중 오류 발생: {str(e)}")
+            import traceback
+            self.log(traceback.format_exc())
+        
+        finally:
+            self.log("\n브라우저 종료 중...")
+            try:
+                if driver:
+                    driver.quit()
+            except:
+                pass
+
+    def download_images(self, products):
+        """상품 이미지 다운로드"""
+        self.log("\n이미지 다운로드 시작...")
+        
+        # PIL 라이브러리 확인
+        try:
+            from PIL import Image, ImageOps
+            has_pil = True
+        except ImportError:
+            self.log("PIL 라이브러리가 설치되어 있지 않습니다. 이미지 리사이징을 건너뜁니다.")
+            has_pil = False
+        
+        # 현재 시간을 기반으로 고유한 이미지 폴더 생성
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        images_dir = os.path.join("results", f"images_{timestamp}")
+        if not os.path.exists(images_dir):
+            os.makedirs(images_dir)
+            self.log(f"\n새로운 이미지 폴더 생성: {images_dir}")
+        
+        # 다운로드 결과 저장
+        downloaded_paths = []
+        
+        # 각 상품의 이미지 다운로드
+        for i, product in enumerate(products):
+            product_num = i + 1  # 상품 번호
+            
+            # 상품코드에서 접미사 부분 추출 (예: W001)
+            code_parts = product.get("판매자 상품코드", "").split('-')
+            code_suffix = code_parts[1] if len(code_parts) > 1 else f"W{product_num:03d}"
+            
+            product_name = product["상품명"]
+            
+            # 상품 번호 추가
+            product["번호"] = product_num
+            
+            # 파일명으로 사용할 수 없는 문자 제거
+            safe_name = re.sub(r'[\\/*?:"<>|]', "", product_name)
+            safe_name = safe_name[:50]  # 이름 길이 제한
+            
+            self.log(f"\n상품 {product_num}/{len(products)} 이미지 다운로드 중: {safe_name}")
+            
+            # 각 이미지 다운로드
+            product_images = []
+            first_image_path = None  # 첫 번째 이미지 경로 저장용
+            
+            # 먼저 1번 이미지 다운로드 시도
+            img_url = product.get("이미지1")
+            if img_url and img_url != "이미지 없음":
+                try:
+                    # 이미지 파일명 사용 (이미 crawl_products 함수에서 설정됨)
+                    img_filename = product.get("이미지파일1", "")
+                    if not img_filename:  # 파일명이 없는 경우 기본값 사용
+                        img_filename = f"{code_suffix}-1.jpg"
+                    
+                    img_path = os.path.join(images_dir, img_filename)
+                    
+                    # 이미지 다운로드
+                    response = requests.get(img_url, stream=True, timeout=10)
+                    if response.status_code == 200:
+                        # 원본 이미지 저장
+                        with open(img_path, 'wb') as f:
+                            for chunk in response.iter_content(1024):
+                                f.write(chunk)
+                        
+                        # 첫 번째 이미지 경로 저장
+                        first_image_path = img_path
+                        product_images.append(img_path)
+                        
+                        # 이미지 캔버스 중앙에 배치 (1000x1000)
+                        if has_pil:
+                            try:
+                                file_size = self.process_image(img_path)
+                                self.log(f"  이미지 1 캔버스 중앙 배치 완료 (1000x1000, {file_size:.1f}KB)")
+                            except Exception as e:
+                                self.log(f"  이미지 1 캔버스 처리 중 오류: {str(e)}")
+                        
+                        self.log(f"  이미지 1 다운로드 완료: {img_filename}")
+                        
+                        # 이미지 파일명과 URL 저장
+                        product["이미지파일1"] = img_filename
+                        product["이미지1"] = img_url
+                except Exception as e:
+                    self.log(f"  이미지 1 다운로드 중 오류: {str(e)}")
+                    first_image_path = None
+            else:
+                self.log("  이미지 1을 찾을 수 없습니다.")
+                first_image_path = None
+            
+            # 2번, 3번 이미지 처리
+            for j in range(2, 4):
+                img_url = product.get(f"이미지{j}")
+                img_filename = product.get(f"이미지파일{j}", "")
+                if not img_filename:  # 파일명이 없는 경우 기본값 사용
+                    img_filename = f"{code_suffix}-{j}.jpg"
+                
+                img_path = os.path.join(images_dir, img_filename)
+                
+                # 1번 이미지가 있고, 2번 또는 3번 이미지가 없거나 다운로드 실패한 경우
+                if first_image_path and (not img_url or img_url == "이미지 없음"):
+                    try:
+                        import shutil
+                        shutil.copy2(first_image_path, img_path)
+                        self.log(f"  이미지 {j}: 1번 이미지를 복사하여 사용")
+                        product_images.append(img_path)
+                        
+                        # 이미지 파일명과 URL 저장
+                        product[f"이미지파일{j}"] = img_filename
+                        product[f"이미지{j}"] = product.get("이미지1", "이미지 없음")
+                    except Exception as e:
+                        self.log(f"  이미지 {j} 복사 중 오류: {str(e)}")
+                        product_images.append("")
+                        product[f"이미지파일{j}"] = ""
+                        product[f"이미지{j}"] = "이미지 없음"
+                # 2번, 3번 이미지가 있는 경우 정상적으로 다운로드
+                elif img_url and img_url != "이미지 없음":
+                    try:
+                        response = requests.get(img_url, stream=True, timeout=10)
+                        if response.status_code == 200:
+                            with open(img_path, 'wb') as f:
+                                for chunk in response.iter_content(1024):
+                                    f.write(chunk)
+                            
+                            # 이미지 캔버스 중앙에 배치 (1000x1000)
+                            if has_pil:
+                                try:
+                                    file_size = self.process_image(img_path)
+                                    self.log(f"  이미지 {j} 캔버스 중앙 배치 완료 (1000x1000, {file_size:.1f}KB)")
+                                except Exception as e:
+                                    self.log(f"  이미지 {j} 캔버스 처리 중 오류: {str(e)}")
+                                
+                            product_images.append(img_path)
+                            self.log(f"  이미지 {j} 다운로드 완료: {img_filename}")
+                            
+                            # 이미지 파일명과 URL 저장
+                            product[f"이미지파일{j}"] = img_filename
+                            product[f"이미지{j}"] = img_url
+                        else:
+                            # 다운로드 실패 시 1번 이미지 복사
+                            if first_image_path:
+                                import shutil
+                                shutil.copy2(first_image_path, img_path)
+                                self.log(f"  이미지 {j}: 다운로드 실패로 1번 이미지를 복사하여 사용")
+                                product_images.append(img_path)
+                                product[f"이미지파일{j}"] = img_filename
+                                product[f"이미지{j}"] = product.get("이미지1", "이미지 없음")
+                            else:
+                                product_images.append("")
+                                product[f"이미지파일{j}"] = ""
+                                product[f"이미지{j}"] = "이미지 없음"
+                    except Exception as e:
+                        self.log(f"  이미지 {j} 다운로드 중 오류: {str(e)}")
+                        # 오류 발생 시 1번 이미지 복사
+                        if first_image_path:
+                            try:
+                                import shutil
+                                shutil.copy2(first_image_path, img_path)
+                                self.log(f"  이미지 {j}: 오류 발생으로 1번 이미지를 복사하여 사용")
+                                product_images.append(img_path)
+                                product[f"이미지파일{j}"] = img_filename
+                                product[f"이미지{j}"] = product.get("이미지1", "이미지 없음")
+                            except:
+                                product_images.append("")
+                                product[f"이미지파일{j}"] = ""
+                                product[f"이미지{j}"] = "이미지 없음"
+                        else:
+                            product_images.append("")
+                            product[f"이미지파일{j}"] = ""
+                            product[f"이미지{j}"] = "이미지 없음"
+                # 이미지 URL이 없고 1번 이미지도 없는 경우
+                else:
+                    product_images.append("")
+                    product[f"이미지파일{j}"] = ""
+                    product[f"이미지{j}"] = "이미지 없음"
+            
+            downloaded_paths.append(product_images)
+            
+            # 진행률 업데이트
+            progress = (i + 1) / len(products) * 100
+            self.progress_var.set(progress)
+            self.window.update_idletasks()
+        
+        self.log("\n이미지 다운로드 완료")
+        
+        # 이미지 폴더 열기
+        try:
+            abs_path = os.path.abspath(images_dir)
+            if os.name == 'nt':  # Windows
+                os.startfile(abs_path)
+            elif os.name == 'posix':  # macOS, Linux
+                import subprocess
+                subprocess.call(('open', abs_path))
+        except:
+            pass
+        
+        return downloaded_paths
+
+    def save_to_excel(self, products):
+        """크롤링 결과를 엑셀 파일로 저장"""
+        try:
+            # 현재 작업 디렉토리에 results 폴더 생성
+            results_dir = "results"
+            if not os.path.exists(results_dir):
+                os.makedirs(results_dir)
+            
+            # 파일명 생성
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = os.path.join(results_dir, f"fredmeyer_products_{timestamp}.xlsx")
+            
+            # 현재 날짜 (YYYYMMDD 형식)
+            current_date = datetime.now().strftime("%Y%m%d")
+            
+            # 이미지 다운로드 (옵션이 활성화된 경우)
+            if self.download_images_var.get():
+                self.download_images(products)
+            
+            # 각 상품에 대표이미지, 추가이미지, 상세설명 필드 추가
+            for product in products:
+                # 판매자 상품코드에서 날짜 부분 추출 (예: 20250305-W001 -> 20250305)
+                date_part = product.get("판매자 상품코드", "").split("-")[0]
+                if not date_part:
+                    date_part = current_date
+                
+                # 대표이미지 필드 추가 (형식: http://www.runtower.co.kr/picture/날짜/이미지파일명)
+                if product.get("이미지파일1"):
+                    product["대표이미지"] = f"http://www.runtower.co.kr/picture/{date_part}/{product['이미지파일1']}"
+                else:
+                    product["대표이미지"] = ""
+                
+                # 추가이미지 필드 추가 (형식: http://www.runtower.co.kr/picture/날짜/이미지파일명)
+                additional_images = []
+                
+                # 이미지파일2가 있으면 추가
+                if product.get("이미지파일2"):
+                    additional_images.append(f"http://www.runtower.co.kr/picture/{date_part}/{product['이미지파일2']}")
+                else:
+                    # 이미지파일2가 없으면 이미지파일1 사용
+                    if product.get("이미지파일1"):
+                        additional_images.append(f"http://www.runtower.co.kr/picture/{date_part}/{product['이미지파일1']}")
+                
+                # 이미지파일3이 있으면 추가
+                if product.get("이미지파일3"):
+                    additional_images.append(f"http://www.runtower.co.kr/picture/{date_part}/{product['이미지파일3']}")
+                else:
+                    # 이미지파일3이 없으면 이미지파일1 사용
+                    if product.get("이미지파일1"):
+                        additional_images.append(f"http://www.runtower.co.kr/picture/{date_part}/{product['이미지파일1']}")
+                
+                # 항상 3개의 이미지 URL이 있도록 보장
+                while len(additional_images) < 3:
+                    if product.get("이미지파일1"):
+                        additional_images.append(f"http://www.runtower.co.kr/picture/{date_part}/{product['이미지파일1']}")
+                    else:
+                        additional_images.append("")
+                
+                # 줄바꿈으로 이미지 URL 구분
+                product["추가이미지"] = "\n".join(additional_images) if additional_images else ""
+                
+                # 상세설명 필드 추가 (HTML 이미지 태그 형식)
+                # 이미지 태그 생성
+                img_tags = "<center>\n"
+                
+                # 3개의 이미지 태그 추가
+                for i in range(1, 4):
+                    img_filename = product.get(f"이미지파일{i}", "")
+                    if img_filename:
+                        img_url = f"http://www.runtower.co.kr/picture/{date_part}/{img_filename}"
+                        img_tags += f'<img src="{img_url}">\n'
+                    elif product.get("이미지파일1", ""):  # 해당 이미지가 없으면 첫 번째 이미지 사용
+                        img_filename = product.get("이미지파일1", "")
+                        img_url = f"http://www.runtower.co.kr/picture/{date_part}/{img_filename}"
+                        img_tags += f'<img src="{img_url}">\n'
+                
+                # 마지막에 고정 이미지 추가
+                img_tags += '<img src="http://www.runtower.co.kr/notice/all_bottom.png">\n'
+                img_tags += "</center>"
+                
+                product["상세설명"] = img_tags
+            
+            # DataFrame 생성 (컬럼 순서 지정)
+            df = pd.DataFrame(products)
+            columns = ["판매자 상품코드", "상품 링크", "상품명", "숫자 가격", 
+                      "이미지1", "이미지파일1", "이미지2", "이미지파일2", "이미지3", "이미지파일3",
+                      "대표이미지", "추가이미지", "상세설명"]
+            df = df.reindex(columns=columns)
+            
+            # 엑셀 파일로 저장
+            with pd.ExcelWriter(filename, engine='openpyxl') as writer:
+                df.to_excel(writer, index=False)
+                
+                # 워크시트 가져오기
+                worksheet = writer.sheets['Sheet1']
+                
+                # openpyxl 폰트 설정
+                from openpyxl.styles import Font, Alignment
+                
+                # "판매자 상품코드" 열의 셀 서식 설정 (맑은고딕, 크기 8)
+                malgun_font = Font(name='맑은 고딕', size=8)
+                
+                # 헤더 행 번호 (1부터 시작)
+                header_row = 1
+                
+                # 데이터 시작 행 번호
+                data_start_row = 2
+                
+                # 데이터 마지막 행 번호
+                data_end_row = len(products) + data_start_row - 1
+                
+                # "판매자 상품코드" 열의 인덱스 (A=1, B=2, ...)
+                code_col = 1
+                
+                # 헤더 셀 서식 설정
+                header_cell = worksheet.cell(row=header_row, column=code_col)
+                header_cell.font = malgun_font
+                
+                # 데이터 셀 서식 설정
+                for row in range(data_start_row, data_end_row + 1):
+                    cell = worksheet.cell(row=row, column=code_col)
+                    cell.font = malgun_font
+                
+                # 추가이미지 열에 줄바꿈 설정 적용
+                # L열: 추가이미지
+                for row in range(data_start_row, data_end_row + 1):
+                    cell = worksheet.cell(row=row, column=12)  # L열 (12번째 열)
+                    cell.alignment = Alignment(wrapText=True, vertical='top')
+                
+                # 상세설명 열에도 줄바꿈 설정 적용
+                # M열: 상세설명
+                for row in range(data_start_row, data_end_row + 1):
+                    cell = worksheet.cell(row=row, column=13)  # M열 (13번째 열)
+                    cell.alignment = Alignment(wrapText=True, vertical='top')
+                
+                # 열 너비 설정
+                worksheet.column_dimensions['A'].width = 11  # 판매자 상품코드
+                worksheet.column_dimensions['B'].width = 10  # 상품 링크
+                worksheet.column_dimensions['C'].width = 10  # 상품명
+                
+                # D열부터 J열까지 너비 5로 설정
+                for col_letter in ['D', 'E', 'F', 'G', 'H', 'I', 'J']:
+                    worksheet.column_dimensions[col_letter].width = 5
+                
+                # 새로 추가된 열 너비 설정
+                worksheet.column_dimensions['K'].width = 48  # 대표이미지
+                worksheet.column_dimensions['L'].width = 49  # 추가이미지
+                worksheet.column_dimensions['M'].width = 60  # 상세설명
+                
+                # 모든 행의 높이를 17로 설정
+                # 헤더 행 높이 설정
+                worksheet.row_dimensions[header_row].height = 17
+                
+                # 데이터 행 높이 설정
+                for row in range(data_start_row, data_end_row + 1):
+                    worksheet.row_dimensions[row].height = 17
+            
+            # 파일 생성 확인
+            if os.path.exists(filename):
+                abs_path = os.path.abspath(filename)
+                self.log(f"\n크롤링 결과가 성공적으로 저장되었습니다.")
+                self.log(f"파일 경로: {abs_path}")
+                
+                # 파일 열기
+                import subprocess
+                if os.name == 'nt':  # Windows
+                    os.startfile(abs_path)
+                elif os.name == 'posix':  # macOS, Linux
+                    subprocess.call(('open', abs_path))
+            else:
+                self.log("\n파일 저장 실패: 파일이 생성되지 않았습니다.")
+            
+        except Exception as e:
+            self.log(f"\n파일 저장 중 오류 발생: {str(e)}")
+            import traceback
+            self.log(traceback.format_exc())
+
+    def run(self):
+        """애플리케이션 실행"""
+        self.window.mainloop()
+
+if __name__ == "__main__":
+    app = FredmeyerCrawlerUI()
+    app.run()
